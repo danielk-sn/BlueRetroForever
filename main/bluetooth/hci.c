@@ -210,6 +210,7 @@ static const struct bt_hci_cmd_cp bt_hci_config[] = {
     {bt_hci_cmd_le_set_adv_data, NULL},
     {bt_hci_cmd_le_set_scan_rsp_data, NULL},
     {bt_hci_cmd_le_set_adv_enable, NULL},
+    {bt_hci_cmd_le_set_event_mask, NULL},
     {bt_hci_start_inquiry_cfg_check, NULL},
 };
 
@@ -1325,9 +1326,6 @@ static void bt_hci_start_inquiry_cfg_check(void *cp) {
         bt_hci_cmd_le_set_scan_enable(1);
     }
 
-    /* Secure Connections support is optional. Keep this command outside the
-     * blocking configuration queue so failure cannot prevent Bluetooth startup. */
-    bt_hci_cmd_le_set_event_mask(NULL);
 }
 
 static void bt_hci_load_le_accept_list(void *cp) {
@@ -1487,8 +1485,10 @@ void bt_hci_start_encryption(uint16_t handle, uint64_t rand, uint16_t ediv, uint
 static void bt_hci_cmd_le_set_event_mask(void *cp) {
     struct bt_hci_cp_le_set_event_mask *event_mask =
         (struct bt_hci_cp_le_set_event_mask *)&bt_hci_pkt_tmp.cp;
-    /* LE events 0-10, including P-256 public-key and DHKey completions. */
-    const uint8_t events[8] = {0xFF, 0x07, 0, 0, 0, 0, 0, 0};
+    /* Events already handled by this host, plus the P-256 and DHKey
+     * completions needed for Secure Connections. Do not enable controller
+     * events for which the host has no handler. */
+    const uint8_t events[8] = {0x9F, 0x01, 0, 0, 0, 0, 0, 0};
 
     memcpy(event_mask->events, events, sizeof(event_mask->events));
     bt_hci_cmd(BT_HCI_OP_LE_SET_EVENT_MASK, sizeof(*event_mask));
@@ -1805,6 +1805,8 @@ void bt_hci_evt_hdlr(struct bt_hci_pkt *bt_hci_evt_pkt) {
             printf("# BT_HCI_EVT_CMD_COMPLETE\n");
             if (cmd_complete->opcode == BT_HCI_OP_LE_SET_EVENT_MASK) {
                 bt_le_sc_available = (status == BT_HCI_ERR_SUCCESS);
+                bt_hci_pkt_retry = 0;
+                bt_hci_q_conf(1);
                 break;
             }
             if (status != BT_HCI_ERR_SUCCESS && status != BT_HCI_ERR_UNKNOWN_CMD) {
