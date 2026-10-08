@@ -8,4 +8,4 @@ RUN sed -i 's/\r$//' /usr/local/bin/blueretro-build
 USER runner
 WORKDIR /project
 ENTRYPOINT ["/usr/local/bin/blueretro-build"]
-CMD ["hw1", "n64"]
+CMD ["all"]
