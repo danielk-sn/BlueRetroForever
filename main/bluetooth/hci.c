@@ -70,6 +70,7 @@ static uint8_t local_bdaddr[6];
 static uint32_t bt_config_state = 0;
 static uint32_t inquiry_state = 0;
 static uint32_t inquiry_override = 0;
+static bool bt_le_sc_available = false;
 static RingbufHandle_t randq_hdl, encryptq_hdl;
 static char local_name[24] = "BlueRetro";
 
@@ -147,6 +148,7 @@ static void bt_hci_cmd_le_set_scan_param_passive(void);
 static void bt_hci_cmd_le_set_scan_enable(uint32_t enable);
 static void bt_hci_cmd_le_create_conn(void *bdaddr_le);
 static void bt_hci_cmd_le_read_wl_size(void *cp);
+static void bt_hci_cmd_le_set_event_mask(void *cp);
 static void bt_hci_cmd_le_clear_wl(void *cp);
 static void bt_hci_cmd_le_add_dev_to_wl(void *bdaddr_le);
 static void bt_hci_cmd_le_conn_update(struct hci_cp_le_conn_update *cp);
@@ -1159,6 +1161,7 @@ static void bt_hci_le_meta_evt_hdlr(struct bt_hci_pkt *bt_hci_evt_pkt) {
                 uint8_t *end = data + le_adv_report->adv_info[0].length;
                 uint8_t len, type;
                 uint16_t value;
+                bool m64_match = false;
 
                 printf("# BT_HCI_EVT_LE_ADVERTISING_REPORT\n");
 
@@ -1180,10 +1183,21 @@ static void bt_hci_le_meta_evt_hdlr(struct bt_hci_pkt *bt_hci_evt_pkt) {
                             /* HID category */
                             value = *(uint16_t *)&data[1];
                             if ((value >> 6) == 0x00F && (value & 0x3F) > 0 && (value & 0x3F) < 5) {
+                                if (value == 0x03C4) {
+                                    m64_match = true;
+                                }
                                 goto connect;
                             }
                             else {
                                 goto skip;
+                            }
+                            break;
+                        case BT_DATA_NAME_COMPLETE:
+                            /* The M64 scan response advertises only its name. */
+                            if (len == sizeof("M64_Controller")
+                                    && !memcmp(&data[1], "M64_Controller", sizeof("M64_Controller") - 1)) {
+                                m64_match = true;
+                                goto connect;
                             }
                             break;
                         case BT_DATA_MANUFACTURER_DATA:
@@ -1210,6 +1224,9 @@ connect:
                         device->ids.type = BT_HID_GENERIC;
                         bt_l2cap_init_dev_scid(device);
                         atomic_set_bit(&device->flags, BT_DEV_DEVICE_FOUND);
+                        if (m64_match && bt_le_sc_available) {
+                            atomic_set_bit(&device->flags, BT_DEV_LE_SC_REQUIRED);
+                        }
                         bt_hci_cmd_le_set_scan_enable(0);
                         bt_hci_cmd_le_set_adv_disable(NULL);
                         bt_hci_cmd_le_create_conn((void *)&le_adv_report->adv_info[0].addr);
@@ -1281,6 +1298,20 @@ skip:
             }
             break;
         }
+        case BT_HCI_EVT_LE_P256_PUBLIC_KEY_COMPLETE:
+        {
+            struct bt_hci_evt_le_p256_public_key_complete *evt =
+                (void *)(bt_hci_evt_pkt->evt_data + sizeof(*le_meta_event));
+            bt_smp_p256_complete(evt->status, evt->key);
+            break;
+        }
+        case BT_HCI_EVT_LE_GENERATE_DHKEY_COMPLETE:
+        {
+            struct bt_hci_evt_le_generate_dhkey_complete *evt =
+                (void *)(bt_hci_evt_pkt->evt_data + sizeof(*le_meta_event));
+            bt_smp_dhkey_complete(evt->status, evt->dhkey);
+            break;
+        }
     }
 }
 
@@ -1293,6 +1324,10 @@ static void bt_hci_start_inquiry_cfg_check(void *cp) {
         bt_hci_cmd_le_set_scan_param_passive();
         bt_hci_cmd_le_set_scan_enable(1);
     }
+
+    /* Secure Connections support is optional. Keep this command outside the
+     * blocking configuration queue so failure cannot prevent Bluetooth startup. */
+    bt_hci_cmd_le_set_event_mask(NULL);
 }
 
 static void bt_hci_load_le_accept_list(void *cp) {
@@ -1351,6 +1386,7 @@ int32_t bt_hci_init(void) {
         return -1;
     }
 
+    bt_le_sc_available = false;
     bt_config_state = 0;
     bt_hci_q_conf(0);
 
@@ -1446,6 +1482,26 @@ int32_t bt_hci_get_encrypt(struct bt_dev *device, bt_hci_le_cb_t cb, const uint8
 
 void bt_hci_start_encryption(uint16_t handle, uint64_t rand, uint16_t ediv, uint8_t *ltk) {
     bt_hci_cmd_le_start_encryption(handle, rand, ediv, ltk);
+}
+
+static void bt_hci_cmd_le_set_event_mask(void *cp) {
+    struct bt_hci_cp_le_set_event_mask *event_mask =
+        (struct bt_hci_cp_le_set_event_mask *)&bt_hci_pkt_tmp.cp;
+    /* LE events 0-10, including P-256 public-key and DHKey completions. */
+    const uint8_t events[8] = {0xFF, 0x07, 0, 0, 0, 0, 0, 0};
+
+    memcpy(event_mask->events, events, sizeof(event_mask->events));
+    bt_hci_cmd(BT_HCI_OP_LE_SET_EVENT_MASK, sizeof(*event_mask));
+}
+
+void bt_hci_le_read_public_key(void) {
+    bt_hci_cmd(BT_HCI_OP_LE_P256_PUBLIC_KEY, 0);
+}
+
+void bt_hci_le_generate_dhkey(const uint8_t peer_key[64]) {
+    struct bt_hci_cp_le_generate_dhkey *cp = (void *)&bt_hci_pkt_tmp.cp;
+    memcpy(cp->key, peer_key, sizeof(cp->key));
+    bt_hci_cmd(BT_HCI_OP_LE_GENERATE_DHKEY, sizeof(*cp));
 }
 
 void bt_hci_add_to_accept_list(bt_addr_le_t *le_bdaddr) {
@@ -1747,6 +1803,10 @@ void bt_hci_evt_hdlr(struct bt_hci_pkt *bt_hci_evt_pkt) {
             struct bt_hci_evt_cmd_complete *cmd_complete = (struct bt_hci_evt_cmd_complete *)bt_hci_evt_pkt->evt_data;
             uint8_t status = bt_hci_evt_pkt->evt_data[sizeof(*cmd_complete)];
             printf("# BT_HCI_EVT_CMD_COMPLETE\n");
+            if (cmd_complete->opcode == BT_HCI_OP_LE_SET_EVENT_MASK) {
+                bt_le_sc_available = (status == BT_HCI_ERR_SUCCESS);
+                break;
+            }
             if (status != BT_HCI_ERR_SUCCESS && status != BT_HCI_ERR_UNKNOWN_CMD) {
                 printf("# opcode: 0x%04X error: 0x%02X retry: %ld\n", cmd_complete->opcode, status, bt_hci_pkt_retry);
                 switch (cmd_complete->opcode) {
