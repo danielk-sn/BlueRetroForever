@@ -11,6 +11,8 @@ bherdm
 
 ## BlueRetroForever Changes
 
+Build firmware locally using the [Docker / Podman build instructions](docs/docker-build.md).
+
 * Switch 2 controller fixes from [Last-Colossi](https://github.com/Last-Colossi/BlueRetro), [bjerreman](https://github.com/bjerreman/BlueRetro-Switch2Fix) & [Ryan Copley](https://github.com/RyanCopley/BlueRetro)'s forks: NSO GameCube phantom stick, multiple controllers, reconnection ([#1249](https://github.com/darthcloud/BlueRetro/issues/1249)).
 * N64 keyboard & mouse support (64DD & libdragon).
 
@@ -63,4 +65,3 @@ Thanks to all sponsors!
   https://github.com/Arthrimus/BlueRetro-HW2-GameCube
 
 <br><p align="center"><img src="https://cdn.hackaday.io/images/4560691598833898038.png" height="200"/></p>
-
